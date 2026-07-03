@@ -49,10 +49,6 @@ function handleClick(event) {
   const linkMatches = matchDomain(url.hostname.toLowerCase(), zendeskDomains);
   if (!linkMatches) return;
 
-  // If we're already on a matching Zendesk tab, let in-app navigation behave normally.
-  const currentPageMatches = matchDomain(location.hostname.toLowerCase(), zendeskDomains);
-  if (currentPageMatches) return;
-
   const isMiddleClick = event.type === "auxclick" && event.button === 1;
   const isModifiedClick =
     event.type === "click" &&
@@ -61,12 +57,19 @@ function handleClick(event) {
 
   if (isMiddleClick || isModifiedClick) {
     // Deliberate "open in a new tab" — let the browser do its normal thing,
-    // just flag this URL so the background script doesn't redirect it.
+    // just flag this URL so the background script doesn't redirect it. This
+    // applies even when already on a Zendesk tab (e.g. middle-clicking an
+    // Admin link to keep it separate from the current ticket).
     chrome.runtime.sendMessage({ type: "allowNewTab", url: url.href });
     return;
   }
 
   if (event.type !== "click" || event.button !== 0) return;
+
+  // Plain left-click: only redirect when arriving from outside Zendesk.
+  // In-app navigation while already on a Zendesk tab is left to the app.
+  const currentPageMatches = matchDomain(location.hostname.toLowerCase(), zendeskDomains);
+  if (currentPageMatches) return;
 
   event.preventDefault();
   event.stopPropagation();
