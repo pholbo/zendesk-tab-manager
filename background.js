@@ -34,6 +34,7 @@ async function getZendeskDomains() {
 
 async function reuseExistingTab(url, tabIdToClose) {
   const domains = await getZendeskDomains();
+  console.log("[ZTM] reuseExistingTab", { url, tabIdToClose, domains });
   if (domains.length === 0) return;
 
   let hostname;
@@ -42,7 +43,9 @@ async function reuseExistingTab(url, tabIdToClose) {
   } catch {
     return;
   }
-  if (!matchDomain(hostname, domains)) return;
+  const matched = matchDomain(hostname, domains);
+  console.log("[ZTM] hostname", hostname, "matched pattern:", matched);
+  if (!matched) return;
 
   const tabs = await chrome.tabs.query({});
   const candidates = tabs.filter((tab) => {
@@ -54,25 +57,32 @@ async function reuseExistingTab(url, tabIdToClose) {
       return false;
     }
   });
+  console.log(
+    "[ZTM] candidate tabs",
+    candidates.map((t) => ({ id: t.id, url: t.url, lastAccessed: t.lastAccessed }))
+  );
 
   candidates.sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0));
   const existingTab = candidates[0];
 
   if (existingTab) {
+    console.log("[ZTM] reusing tab", existingTab.id);
     await chrome.tabs.update(existingTab.id, { url, active: true });
     await chrome.windows.update(existingTab.windowId, { focused: true });
     if (tabIdToClose !== undefined) {
       await chrome.tabs.remove(tabIdToClose);
     }
   } else if (tabIdToClose === undefined) {
+    console.log("[ZTM] no existing tab, creating new one");
     await chrome.tabs.create({ url, active: true });
+  } else {
+    console.log("[ZTM] no existing tab, leaving external tab", tabIdToClose, "as-is");
   }
-  // else: this is the first Zendesk tab and it already exists (tabIdToClose) —
-  // leave it as-is, it becomes the tab that gets reused next time.
 }
 
 // Case 1: link clicked inside a page running content.js.
 chrome.runtime.onMessage.addListener((message) => {
+  console.log("[ZTM] onMessage", message);
   if (message && message.type === "openZendeskLink" && message.url) {
     reuseExistingTab(message.url);
   }
@@ -82,6 +92,7 @@ chrome.runtime.onMessage.addListener((message) => {
 const pendingExternalTabs = new Set();
 
 chrome.tabs.onCreated.addListener((tab) => {
+  console.log("[ZTM] tabs.onCreated", { id: tab.id, openerTabId: tab.openerTabId, url: tab.url, pendingUrl: tab.pendingUrl });
   if (tab.openerTabId) return;
   if (tab.url) {
     reuseExistingTab(tab.url, tab.id);
@@ -94,6 +105,7 @@ chrome.tabs.onRemoved.addListener((tabId) => pendingExternalTabs.delete(tabId));
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (!pendingExternalTabs.has(tabId)) return;
+  console.log("[ZTM] onUpdated for pending external tab", tabId, changeInfo);
   if (!changeInfo.url) return;
   pendingExternalTabs.delete(tabId);
   reuseExistingTab(changeInfo.url, tabId);
