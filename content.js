@@ -1,11 +1,8 @@
-// Runs on every page. Intercepts plain left-clicks on links pointing at a
-// configured Zendesk domain and redirects them to the background script,
-// which reuses an existing Zendesk tab instead of opening a new one.
-//
-// Middle-clicks fire an "auxclick" event, not "click" — so this listener
-// never sees them, and the browser's normal "open in new tab" behavior
-// happens untouched. Ctrl/Cmd/Shift-clicks are treated the same way, since
-// those are also explicit "open elsewhere" gestures.
+// Runs on every page. Every new Zendesk tab gets redirected into the
+// existing one by default (see background.js) — this script's job is just
+// to tell the background script when a click was a deliberate "open in a
+// new tab" gesture (middle-click, or Ctrl/Cmd/Shift-click) so that one
+// specific tab is let through instead of being redirected.
 
 let zendeskDomains = [];
 
@@ -37,8 +34,6 @@ function matchDomain(hostname, patterns) {
 function handleClick(event) {
   if (zendeskDomains.length === 0) return;
   if (event.defaultPrevented) return;
-  if (event.button !== 0) return;
-  if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
 
   const anchor = event.target.closest && event.target.closest("a[href]");
   if (!anchor) return;
@@ -58,9 +53,25 @@ function handleClick(event) {
   const currentPageMatches = matchDomain(location.hostname.toLowerCase(), zendeskDomains);
   if (currentPageMatches) return;
 
+  const isMiddleClick = event.type === "auxclick" && event.button === 1;
+  const isModifiedClick =
+    event.type === "click" &&
+    event.button === 0 &&
+    (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey);
+
+  if (isMiddleClick || isModifiedClick) {
+    // Deliberate "open in a new tab" — let the browser do its normal thing,
+    // just flag this URL so the background script doesn't redirect it.
+    chrome.runtime.sendMessage({ type: "allowNewTab", url: url.href });
+    return;
+  }
+
+  if (event.type !== "click" || event.button !== 0) return;
+
   event.preventDefault();
   event.stopPropagation();
   chrome.runtime.sendMessage({ type: "openZendeskLink", url: url.href });
 }
 
 document.addEventListener("click", handleClick, true);
+document.addEventListener("auxclick", handleClick, true);

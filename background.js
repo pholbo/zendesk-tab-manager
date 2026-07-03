@@ -1,16 +1,13 @@
-// Two ways a Zendesk link reaches us:
+// Every newly created tab pointing at a configured Zendesk domain gets
+// redirected into an existing Zendesk tab, UNLESS content.js told us in
+// advance (via an "allowNewTab" message) that this exact URL was opened
+// deliberately — middle-click, or Ctrl/Cmd/Shift-click.
 //
-// 1. Clicked inside a page where content.js is running: it cancels the
-//    click and sends us an "openZendeskLink" message before any tab is
-//    created.
-//
-// 2. Opened from outside Chrome entirely (Obsidian, Slack desktop, Mail,
-//    etc.): the OS asks Chrome to open the URL directly, so a new tab
-//    appears with no content.js involvement. We catch this in
-//    chrome.tabs.onCreated instead. Such tabs have no openerTabId, which is
-//    what distinguishes them from tabs opened by clicking a link *inside*
-//    an existing Chrome tab (including middle-click / Ctrl/Cmd-click new
-//    tabs, which do have an openerTabId and must be left alone).
+// We can't tell "opened deliberately" apart from "opened elsewhere" using
+// chrome.tabs.Tab.openerTabId: Chrome sets it to the current active tab
+// even for links opened by another app entirely (e.g. clicking a link in
+// Obsidian), so it doesn't actually mean "a click inside this tab caused
+// it." The allowlist above is what makes the distinction reliably.
 
 function matchDomain(hostname, patterns) {
   for (const raw of patterns) {
@@ -32,9 +29,26 @@ async function getZendeskDomains() {
   return result.zendeskDomains || [];
 }
 
+const allowedNewTabUrls = new Map(); // url -> expiry timeoutId
+const ALLOW_TTL_MS = 5000;
+
+function allowNewTab(url) {
+  if (allowedNewTabUrls.has(url)) {
+    clearTimeout(allowedNewTabUrls.get(url));
+  }
+  const timeoutId = setTimeout(() => allowedNewTabUrls.delete(url), ALLOW_TTL_MS);
+  allowedNewTabUrls.set(url, timeoutId);
+}
+
+function consumeAllowedNewTab(url) {
+  if (!allowedNewTabUrls.has(url)) return false;
+  clearTimeout(allowedNewTabUrls.get(url));
+  allowedNewTabUrls.delete(url);
+  return true;
+}
+
 async function reuseExistingTab(url, tabIdToClose) {
   const domains = await getZendeskDomains();
-  console.log("[ZTM] reuseExistingTab", { url, tabIdToClose, domains });
   if (domains.length === 0) return;
 
   let hostname;
@@ -43,9 +57,7 @@ async function reuseExistingTab(url, tabIdToClose) {
   } catch {
     return;
   }
-  const matched = matchDomain(hostname, domains);
-  console.log("[ZTM] hostname", hostname, "matched pattern:", matched);
-  if (!matched) return;
+  if (!matchDomain(hostname, domains)) return;
 
   const tabs = await chrome.tabs.query({});
   const candidates = tabs.filter((tab) => {
@@ -57,56 +69,53 @@ async function reuseExistingTab(url, tabIdToClose) {
       return false;
     }
   });
-  console.log(
-    "[ZTM] candidate tabs",
-    candidates.map((t) => ({ id: t.id, url: t.url, lastAccessed: t.lastAccessed }))
-  );
 
   candidates.sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0));
   const existingTab = candidates[0];
 
   if (existingTab) {
-    console.log("[ZTM] reusing tab", existingTab.id);
     await chrome.tabs.update(existingTab.id, { url, active: true });
     await chrome.windows.update(existingTab.windowId, { focused: true });
     if (tabIdToClose !== undefined) {
       await chrome.tabs.remove(tabIdToClose);
     }
   } else if (tabIdToClose === undefined) {
-    console.log("[ZTM] no existing tab, creating new one");
     await chrome.tabs.create({ url, active: true });
-  } else {
-    console.log("[ZTM] no existing tab, leaving external tab", tabIdToClose, "as-is");
   }
+  // else: this is the first Zendesk tab and it already exists (tabIdToClose) —
+  // leave it as-is, it becomes the tab that gets reused next time.
 }
 
-// Case 1: link clicked inside a page running content.js.
 chrome.runtime.onMessage.addListener((message) => {
-  console.log("[ZTM] onMessage", message);
-  if (message && message.type === "openZendeskLink" && message.url) {
+  if (!message) return;
+  if (message.type === "openZendeskLink" && message.url) {
     reuseExistingTab(message.url);
+  } else if (message.type === "allowNewTab" && message.url) {
+    allowNewTab(message.url);
   }
 });
 
-// Case 2: tab opened from outside Chrome.
-const pendingExternalTabs = new Set();
+function handleNewTab(tab, url) {
+  if (consumeAllowedNewTab(url)) return; // deliberate new tab — leave it alone
+  reuseExistingTab(url, tab.id);
+}
+
+const pendingTabs = new Set();
 
 chrome.tabs.onCreated.addListener((tab) => {
-  console.log("[ZTM] tabs.onCreated", { id: tab.id, openerTabId: tab.openerTabId, url: tab.url, pendingUrl: tab.pendingUrl });
-  if (tab.openerTabId) return;
-  if (tab.url) {
-    reuseExistingTab(tab.url, tab.id);
+  const candidateUrl = tab.url || tab.pendingUrl;
+  if (candidateUrl) {
+    handleNewTab(tab, candidateUrl);
   } else {
-    pendingExternalTabs.add(tab.id);
+    pendingTabs.add(tab.id);
   }
 });
 
-chrome.tabs.onRemoved.addListener((tabId) => pendingExternalTabs.delete(tabId));
+chrome.tabs.onRemoved.addListener((tabId) => pendingTabs.delete(tabId));
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-  if (!pendingExternalTabs.has(tabId)) return;
-  console.log("[ZTM] onUpdated for pending external tab", tabId, changeInfo);
+  if (!pendingTabs.has(tabId)) return;
   if (!changeInfo.url) return;
-  pendingExternalTabs.delete(tabId);
-  reuseExistingTab(changeInfo.url, tabId);
+  pendingTabs.delete(tabId);
+  handleNewTab({ id: tabId }, changeInfo.url);
 });
