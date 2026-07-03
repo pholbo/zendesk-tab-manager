@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "Zendesk Tab Manager",
+  "version": "1.0.0",
+  "description": "Opens Zendesk links in your existing Zendesk tab instead of a new one. Middle-click (or Ctrl/Cmd-click) still opens a new tab when you want one.",
+  "permissions": ["tabs", "storage"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_start"
+    }
+  ],
+  "options_page": "options.html",
+  "action": {
+    "default_popup": "options.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
